@@ -1,0 +1,60 @@
+{
+  "name": "@involvex/disk-tui",
+  "version": "0.0.1",
+  "description": "A modern CLI app built with Ink and Bun",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "license": "MIT",
+  "author": "involvex",
+  "type": "module",
+  "bin": {
+    "disk-tui": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prebuild": "bun run format && bun run lint:fix && bun run typecheck",
+    "build": "bun build src/cli.tsx --outdir dist --target node",
+    "dev": "bun run --hot src/cli.tsx",
+    "format": "bun fmt",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "start": "bun run src/cli.tsx",
+    "test": "bun test",
+    "typecheck": "bun check"
+  },
+  "dependencies": {
+    "ink": "latest",
+    "ink-select-input": "latest",
+    "ink-text-input": "latest",
+    "meow": "latest",
+    "react": "latest",
+    "react-devtools-core": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/ink": "latest",
+    "@types/ink-select-input": "latest",
+    "@types/ink-text-input": "latest",
+    "@types/react": "latest",
+    "@typescript-eslint/eslint-plugin": "latest",
+    "@typescript-eslint/parser": "latest",
+    "bun-types": "latest",
+    "chalk": "latest",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "globals": "^17.14.0",
+    "ink-testing-library": "^3.0.0",
+    "jiti": "latest",
+    "ts-node": "latest",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.72.1"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
