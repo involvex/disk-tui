@@ -1,10 +1,10 @@
 {
   "name": "@involvex/disk-tui",
   "version": "0.0.1",
-  "description": "A modern CLI app built with Ink and Bun",
+  "description": "A modern CLI app built with Ink and Bun to display disk information",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/involvex/disk-tui.git"
   },
   "license": "MIT",
   "author": "involvex",
