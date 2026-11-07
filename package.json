@@ -1,6 +1,6 @@
 {
   "name": "@involvex/disk-tui",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A modern CLI app built with Ink and Bun to display disk information",
   "repository": {
     "type": "git",
