@@ -1,6 +1,12 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useState } from "react";
-import { diskFormat, getDiskInfo, type DiskDrive } from "../lib/disk-info.js";
+import {
+  diskFormat,
+  getDiskAnalytics,
+  type DiskAnalytics,
+  type DiskVolume,
+  type PhysicalDisk,
+} from "../lib/disk-info.js";
 
 type Props = {
   onContinue?: () => void;
@@ -8,26 +14,117 @@ type Props = {
 
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; disks: DiskDrive[] }
+  | { status: "ready"; data: DiskAnalytics }
   | { status: "error"; message: string };
 
-function UsageBar({ capacity }: { capacity: string }) {
-  const pct = Number.parseInt(capacity, 10);
-  const clamped = Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0;
-  const width = 20;
+function useColor(use: number): "red" | "yellow" | "green" {
+  if (use >= 90) {
+    return "red";
+  }
+  if (use >= 75) {
+    return "yellow";
+  }
+  return "green";
+}
+
+function UsageBar({ use, width = 24 }: { use: number; width?: number }) {
+  const clamped = Number.isFinite(use) ? Math.min(100, Math.max(0, use)) : 0;
   const filled = Math.round((clamped / 100) * width);
   const empty = width - filled;
-  const color = clamped >= 90 ? "red" : clamped >= 75 ? "yellow" : "green";
+  const color = useColor(clamped);
 
   return (
     <Text>
       [<Text color={color}>{"█".repeat(filled)}</Text>
-      <Text dimColor>{"░".repeat(empty)}</Text>] {capacity}
+      <Text dimColor>{"░".repeat(empty)}</Text>]{" "}
+      <Text color={color}>{diskFormat.percent(clamped)}</Text>
     </Text>
   );
 }
 
-function DiskRow({ disk }: { disk: DiskDrive }) {
+function Meta({ label, value }: { label: string; value: string }) {
+  if (!value) {
+    return null;
+  }
+  return (
+    <Text>
+      <Text dimColor>{label}: </Text>
+      <Text>{value}</Text>
+    </Text>
+  );
+}
+
+function SummaryPanel({ data }: { data: DiskAnalytics }) {
+  const { summary } = data;
+  const color = useColor(summary.overallUse);
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="magenta"
+      paddingX={1}
+      marginBottom={1}
+    >
+      <Text bold color="magenta">
+        Overview
+      </Text>
+      <Text>
+        Storage <Text color={color}>{diskFormat.bytes(summary.totalUsed)}</Text>
+        {" / "}
+        {diskFormat.bytes(summary.totalSize)}
+        <Text dimColor> ({diskFormat.bytes(summary.totalAvailable)} free)</Text>
+      </Text>
+      <UsageBar use={summary.overallUse} />
+      <Box marginTop={1} flexDirection="column">
+        <Text>
+          Volumes: <Text color="cyan">{summary.volumeCount}</Text>
+          {summary.physicalCount > 0 ? (
+            <>
+              {" · "}Physical: <Text color="cyan">{summary.physicalCount}</Text>
+            </>
+          ) : null}
+          {summary.ssdCount > 0 || summary.hddCount > 0 ? (
+            <Text dimColor>
+              {" "}
+              (SSD {summary.ssdCount} · HDD {summary.hddCount})
+            </Text>
+          ) : null}
+        </Text>
+        <Text>
+          Health:{" "}
+          {summary.criticalVolumes > 0 ? (
+            <Text color="red">{summary.criticalVolumes} critical (≥90%)</Text>
+          ) : summary.warningVolumes > 0 ? (
+            <Text color="yellow">{summary.warningVolumes} warning (≥75%)</Text>
+          ) : (
+            <Text color="green">ok</Text>
+          )}
+          <Text dimColor>
+            {" "}
+            · source {data.source} · {data.platform}
+          </Text>
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+function VolumeCard({ volume }: { volume: DiskVolume }) {
+  const title = volume.label
+    ? `${volume.mount} (${volume.label})`
+    : volume.mount || volume.filesystem;
+  const access =
+    volume.rw === null ? "" : volume.rw ? "read-write" : "read-only";
+  const kind = [
+    volume.type,
+    volume.physical,
+    volume.removable ? "removable" : "",
+    access,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <Box
       flexDirection="column"
@@ -38,17 +135,58 @@ function DiskRow({ disk }: { disk: DiskDrive }) {
     >
       <Text>
         <Text bold color="cyan">
-          {disk.mounted || disk.filesystem}
+          {title}
         </Text>
-        {disk.mounted && disk.filesystem ? (
-          <Text dimColor> · {disk.filesystem}</Text>
-        ) : null}
+      </Text>
+      <Text dimColor>{kind}</Text>
+      <Text>
+        Used {diskFormat.bytes(volume.used)} / {diskFormat.bytes(volume.size)}
+        <Text dimColor> ({diskFormat.bytes(volume.available)} free)</Text>
+      </Text>
+      <UsageBar use={volume.use} />
+      {volume.device ? <Meta label="Device" value={volume.device} /> : null}
+      {volume.filesystem && volume.filesystem !== volume.mount ? (
+        <Meta label="FS" value={volume.filesystem} />
+      ) : null}
+    </Box>
+  );
+}
+
+function PhysicalCard({ disk }: { disk: PhysicalDisk }) {
+  const smartColor = /ok/i.test(disk.smartStatus)
+    ? "green"
+    : /unknown/i.test(disk.smartStatus)
+      ? undefined
+      : "red";
+
+  return (
+    <Box
+      flexDirection="column"
+      marginBottom={1}
+      borderStyle="round"
+      borderColor="yellow"
+      paddingX={1}
+    >
+      <Text>
+        <Text bold color="yellow">
+          {disk.name}
+        </Text>
+        {disk.vendor ? <Text dimColor> · {disk.vendor}</Text> : null}
       </Text>
       <Text>
-        Used {diskFormat.bytes(disk.used)} / {diskFormat.bytes(disk.blocks)}
-        <Text dimColor> ({diskFormat.bytes(disk.available)} free)</Text>
+        {disk.type || "Disk"}
+        {disk.interfaceType ? ` · ${disk.interfaceType}` : ""}
+        {" · "}
+        {diskFormat.bytes(disk.size)}
       </Text>
-      <UsageBar capacity={disk.capacity} />
+      <Text>
+        SMART: <Text color={smartColor}>{disk.smartStatus || "n/a"}</Text>
+        {disk.temperature !== null ? (
+          <Text dimColor> · {disk.temperature}°C</Text>
+        ) : null}
+      </Text>
+      {disk.serialNum ? <Meta label="Serial" value={disk.serialNum} /> : null}
+      {disk.device ? <Meta label="Path" value={disk.device} /> : null}
     </Box>
   );
 }
@@ -59,10 +197,10 @@ export default function DiskInfo({ onContinue }: Props) {
   useEffect(() => {
     let cancelled = false;
 
-    getDiskInfo()
-      .then((disks) => {
+    getDiskAnalytics()
+      .then((data) => {
         if (!cancelled) {
-          setState({ status: "ready", disks });
+          setState({ status: "ready", data });
         }
       })
       .catch((error: unknown) => {
@@ -91,12 +229,12 @@ export default function DiskInfo({ onContinue }: Props) {
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
         <Text bold color="cyan">
-          ─── Disk Info ───
+          ─── Disk Analytics ───
         </Text>
       </Box>
 
       {state.status === "loading" && (
-        <Text color="magenta">Reading disks…</Text>
+        <Text color="magenta">Collecting disk analytics…</Text>
       )}
 
       {state.status === "error" && (
@@ -113,14 +251,43 @@ export default function DiskInfo({ onContinue }: Props) {
         </Box>
       )}
 
-      {state.status === "ready" && state.disks.length === 0 && (
-        <Text dimColor>No disks found on this system.</Text>
-      )}
+      {state.status === "ready" && (
+        <>
+          <SummaryPanel data={state.data} />
 
-      {state.status === "ready" &&
-        state.disks.map((disk) => (
-          <DiskRow key={`${disk.mounted}-${disk.filesystem}`} disk={disk} />
-        ))}
+          <Box marginBottom={1}>
+            <Text bold color="cyan">
+              Volumes
+            </Text>
+          </Box>
+          {state.data.volumes.length === 0 ? (
+            <Text dimColor>No volumes found.</Text>
+          ) : (
+            state.data.volumes.map((volume) => (
+              <VolumeCard
+                key={`${volume.mount}-${volume.filesystem}`}
+                volume={volume}
+              />
+            ))
+          )}
+
+          {state.data.physical.length > 0 && (
+            <>
+              <Box marginTop={1} marginBottom={1}>
+                <Text bold color="yellow">
+                  Physical disks
+                </Text>
+              </Box>
+              {state.data.physical.map((disk) => (
+                <PhysicalCard
+                  key={`${disk.device}-${disk.serialNum}-${disk.name}`}
+                  disk={disk}
+                />
+              ))}
+            </>
+          )}
+        </>
+      )}
 
       {onContinue && (
         <Box marginTop={1}>

@@ -1,11 +1,60 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import si from "systeminformation";
 
 const execFileAsync = promisify(execFile);
 
-/**
- * Normalized drive / mount info shared across platforms.
- */
+/** Mounted filesystem / volume. */
+export type DiskVolume = {
+  filesystem: string;
+  type: string;
+  size: number;
+  used: number;
+  available: number;
+  use: number;
+  mount: string;
+  rw: boolean | null;
+  label: string;
+  physical: string;
+  removable: boolean;
+  device: string;
+};
+
+/** Physical drive from the hardware layout. */
+export type PhysicalDisk = {
+  device: string;
+  name: string;
+  type: string;
+  vendor: string;
+  size: number;
+  interfaceType: string;
+  smartStatus: string;
+  serialNum: string;
+  temperature: number | null;
+};
+
+export type DiskSummary = {
+  volumeCount: number;
+  physicalCount: number;
+  totalSize: number;
+  totalUsed: number;
+  totalAvailable: number;
+  overallUse: number;
+  ssdCount: number;
+  hddCount: number;
+  criticalVolumes: number;
+  warningVolumes: number;
+};
+
+export type DiskAnalytics = {
+  volumes: DiskVolume[];
+  physical: PhysicalDisk[];
+  summary: DiskSummary;
+  source: "systeminformation" | "fallback";
+  platform: string;
+};
+
+/** @deprecated Prefer DiskVolume — kept for older call sites. */
 export type DiskDrive = {
   filesystem: string;
   blocks: number;
@@ -14,13 +63,6 @@ export type DiskDrive = {
   capacity: string;
   mounted: string;
 };
-
-function formatCapacity(used: number, total: number): string {
-  if (total <= 0) {
-    return "0%";
-  }
-  return `${Math.round((used / total) * 100)}%`;
-}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
@@ -37,31 +79,64 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unit]}`;
 }
 
+function formatPercent(use: number): string {
+  if (!Number.isFinite(use)) {
+    return "0%";
+  }
+  return `${Math.round(use)}%`;
+}
+
 /**
- * Human-readable size helpers for the TUI.
+ * Human-readable size / percent helpers for the TUI.
  */
 export const diskFormat = {
   bytes: formatBytes,
+  percent: formatPercent,
 };
 
-async function run(
-  command: string,
-  args: string[],
-  options?: { shell?: boolean },
-): Promise<string> {
+function buildSummary(
+  volumes: DiskVolume[],
+  physical: PhysicalDisk[],
+): DiskSummary {
+  const totalSize = volumes.reduce((sum, v) => sum + v.size, 0);
+  const totalUsed = volumes.reduce((sum, v) => sum + v.used, 0);
+  const totalAvailable = volumes.reduce((sum, v) => sum + v.available, 0);
+
+  return {
+    volumeCount: volumes.length,
+    physicalCount: physical.length,
+    totalSize,
+    totalUsed,
+    totalAvailable,
+    overallUse: totalSize > 0 ? (totalUsed / totalSize) * 100 : 0,
+    ssdCount: physical.filter((d) => /ssd|nvme/i.test(d.type)).length,
+    hddCount: physical.filter((d) => /^(hd|hdd)$/i.test(d.type)).length,
+    criticalVolumes: volumes.filter((v) => v.use >= 90).length,
+    warningVolumes: volumes.filter((v) => v.use >= 75 && v.use < 90).length,
+  };
+}
+
+function volumeToDrive(volume: DiskVolume): DiskDrive {
+  return {
+    filesystem: volume.type || volume.filesystem,
+    blocks: volume.size,
+    used: volume.used,
+    available: volume.available,
+    capacity: formatPercent(volume.use),
+    mounted: volume.mount,
+  };
+}
+
+async function run(command: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(command, args, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 4,
     windowsHide: true,
-    shell: options?.shell ?? false,
   });
   return stdout;
 }
 
-/**
- * Windows: PowerShell CIM (wmic is removed on modern Windows).
- */
-async function getWindowsDisks(): Promise<DiskDrive[]> {
+async function fallbackWindowsVolumes(): Promise<DiskVolume[]> {
   const script = [
     "Get-CimInstance Win32_LogicalDisk |",
     "Select-Object DeviceID,FileSystem,Size,FreeSpace,VolumeName |",
@@ -74,7 +149,6 @@ async function getWindowsDisks(): Promise<DiskDrive[]> {
     "-Command",
     script,
   ]);
-
   const trimmed = stdout.trim();
   if (!trimmed) {
     return [];
@@ -97,27 +171,25 @@ async function getWindowsDisks(): Promise<DiskDrive[]> {
       const free = Number(row.FreeSpace ?? 0);
       const used = Math.max(0, size - free);
       const mount = row.DeviceID ?? "";
-      const label = row.VolumeName?.trim();
-      const fs =
-        [row.FileSystem, label].filter(Boolean).join(" ") || "Local Disk";
-
       return {
-        filesystem: fs,
-        blocks: size,
+        filesystem: mount,
+        type: row.FileSystem ?? "unknown",
+        size,
         used,
         available: free,
-        capacity: formatCapacity(used, size),
-        mounted: mount,
+        use: size > 0 ? (used / size) * 100 : 0,
+        mount,
+        rw: true,
+        label: row.VolumeName?.trim() ?? "",
+        physical: "Local",
+        removable: false,
+        device: "",
       };
     })
-    .filter((d) => d.mounted.length > 0);
+    .filter((d) => d.mount.length > 0 && d.size > 0);
 }
 
-/**
- * Linux / Android Termux: portable `df -kP` (POSIX-ish columns).
- * Filters virtual / pseudo filesystems that clutter Termux output.
- */
-async function getUnixDisks(): Promise<DiskDrive[]> {
+async function fallbackUnixVolumes(): Promise<DiskVolume[]> {
   const skipFs = new Set([
     "tmpfs",
     "devtmpfs",
@@ -138,7 +210,6 @@ async function getUnixDisks(): Promise<DiskDrive[]> {
     "overlay",
     "squashfs",
   ]);
-
   const skipMountPrefixes = [
     "/proc",
     "/sys",
@@ -155,14 +226,11 @@ async function getUnixDisks(): Promise<DiskDrive[]> {
   try {
     stdout = await run("df", ["-kP"]);
   } catch {
-    // BusyBox / some Termux builds: drop -P
     stdout = await run("df", ["-k"]);
   }
 
-  const lines = stdout.split(/\r?\n/).filter(Boolean);
-  // Drop header
-  const body = lines.slice(1);
-  const drives: DiskDrive[] = [];
+  const body = stdout.split(/\r?\n/).filter(Boolean).slice(1);
+  const volumes: DiskVolume[] = [];
 
   for (const line of body) {
     const parts = line.trim().split(/\s+/);
@@ -174,43 +242,40 @@ async function getUnixDisks(): Promise<DiskDrive[]> {
     const blocksKb = Number(parts[1] ?? 0);
     const usedKb = Number(parts[2] ?? 0);
     const availKb = Number(parts[3] ?? 0);
-    const capacityToken = parts[4] ?? "0%";
-    const mounted = parts.slice(5).join(" ");
+    const mount = parts.slice(5).join(" ");
 
-    const fsName = filesystem.toLowerCase();
-    if (skipFs.has(fsName)) {
+    if (skipFs.has(filesystem.toLowerCase())) {
       continue;
     }
     if (
-      skipMountPrefixes.some(
-        (p) => mounted === p || mounted.startsWith(`${p}/`),
-      )
+      skipMountPrefixes.some((p) => mount === p || mount.startsWith(`${p}/`))
     ) {
       continue;
     }
-    // Skip zero-size pseudo mounts
     if (!Number.isFinite(blocksKb) || blocksKb <= 0) {
       continue;
     }
 
-    const blocks = blocksKb * 1024;
+    const size = blocksKb * 1024;
     const used = usedKb * 1024;
     const available = availKb * 1024;
-    const capacity = capacityToken.endsWith("%")
-      ? capacityToken
-      : formatCapacity(used, blocks);
 
-    drives.push({
+    volumes.push({
       filesystem,
-      blocks,
+      type: filesystem.includes("/") ? "local" : filesystem,
+      size,
       used,
       available,
-      capacity,
-      mounted,
+      use: size > 0 ? (used / size) * 100 : 0,
+      mount,
+      rw: null,
+      label: "",
+      physical: "Local",
+      removable: false,
+      device: "",
     });
   }
 
-  // Prefer real storage mounts first (/, /data, /sdcard, /home, drive letters)
   const rank = (mounted: string): number => {
     if (mounted === "/" || mounted === "/data" || mounted === "/sdcard") {
       return 0;
@@ -221,28 +286,120 @@ async function getUnixDisks(): Promise<DiskDrive[]> {
     return 2;
   };
 
-  return drives.sort((a, b) => rank(a.mounted) - rank(b.mounted));
+  return volumes.sort((a, b) => rank(a.mount) - rank(b.mount));
+}
+
+async function getFallbackVolumes(): Promise<DiskVolume[]> {
+  if (process.platform === "win32") {
+    return fallbackWindowsVolumes();
+  }
+  return fallbackUnixVolumes();
+}
+
+type BlockRow = Awaited<ReturnType<typeof si.blockDevices>>[number];
+
+function enrichFromBlockDevices(
+  volumes: DiskVolume[],
+  blocks: BlockRow[],
+): DiskVolume[] {
+  return volumes.map((volume) => {
+    const match = blocks.find(
+      (b) =>
+        b.mount === volume.mount ||
+        b.name === volume.mount ||
+        b.identifier === volume.mount ||
+        b.name === volume.filesystem,
+    );
+    if (!match) {
+      return volume;
+    }
+    return {
+      ...volume,
+      label: volume.label || match.label || "",
+      physical: match.physical || volume.physical,
+      removable: Boolean(match.removable),
+      device: match.device || volume.device,
+      type: volume.type || match.fsType || "unknown",
+    };
+  });
 }
 
 /**
- * Collect disk / mount info for the current OS.
- * Supports Windows (PowerShell), Linux, and Android Termux (df).
+ * Full disk analytics: volumes, physical layout, and summary stats.
+ * Prefers `systeminformation`; falls back to PowerShell / df for Termux etc.
  */
-export async function getDiskInfo(): Promise<DiskDrive[]> {
+export async function getDiskAnalytics(): Promise<DiskAnalytics> {
   const platform = process.platform;
 
-  if (platform === "win32") {
-    return getWindowsDisks();
-  }
-
-  if (platform === "linux" || platform === "android" || platform === "darwin") {
-    return getUnixDisks();
-  }
-
-  // Fallback: try df anywhere else (BSD, etc.)
   try {
-    return await getUnixDisks();
+    const [fsSize, diskLayout, blockDevices] = await Promise.all([
+      si.fsSize(),
+      si
+        .diskLayout()
+        .catch(() => [] as Awaited<ReturnType<typeof si.diskLayout>>),
+      si
+        .blockDevices()
+        .catch(() => [] as Awaited<ReturnType<typeof si.blockDevices>>),
+    ]);
+
+    const mapped = fsSize
+      .filter((v) => Number(v.size) > 0)
+      .map((v) => ({
+        filesystem: v.fs,
+        type: v.type || "unknown",
+        size: Number(v.size) || 0,
+        used: Number(v.used) || 0,
+        available: Number(v.available) || 0,
+        use: Number(v.use) || 0,
+        mount: v.mount || v.fs,
+        rw: typeof v.rw === "boolean" ? v.rw : null,
+        label: "",
+        physical: "Local",
+        removable: false,
+        device: "",
+      }));
+
+    const volumes = enrichFromBlockDevices(mapped, blockDevices);
+    if (volumes.length === 0) {
+      throw new Error("systeminformation returned no volumes");
+    }
+
+    const physical: PhysicalDisk[] = diskLayout.map((d) => ({
+      device: d.device || "",
+      name: d.name || "Unknown disk",
+      type: d.type || "Unknown",
+      vendor: d.vendor || "",
+      size: Number(d.size) || 0,
+      interfaceType: d.interfaceType || "",
+      smartStatus: d.smartStatus || "unknown",
+      serialNum: d.serialNum || "",
+      temperature: typeof d.temperature === "number" ? d.temperature : null,
+    }));
+
+    return {
+      volumes,
+      physical,
+      summary: buildSummary(volumes, physical),
+      source: "systeminformation",
+      platform,
+    };
   } catch {
-    throw new Error(`Disk info is not supported on platform: ${platform}`);
+    const volumes = await getFallbackVolumes();
+    const physical: PhysicalDisk[] = [];
+    return {
+      volumes,
+      physical,
+      summary: buildSummary(volumes, physical),
+      source: "fallback",
+      platform,
+    };
   }
+}
+
+/**
+ * Volume list only (legacy shape used by simple call sites).
+ */
+export async function getDiskInfo(): Promise<DiskDrive[]> {
+  const analytics = await getDiskAnalytics();
+  return analytics.volumes.map(volumeToDrive);
 }

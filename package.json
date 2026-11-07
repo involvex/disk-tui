@@ -32,7 +32,8 @@
     "ink-text-input": "latest",
     "meow": "latest",
     "react": "latest",
-    "react-devtools-core": "latest"
+    "react-devtools-core": "latest",
+    "systeminformation": "^5.33.19"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
